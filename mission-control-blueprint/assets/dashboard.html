@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mission Control</title>
+<script>
+/* ============================================================
+   MC_CONFIG — customize per business (the only block to edit).
+   Domain folder names live here; the data SCHEMAS are fixed
+   (see the blueprint playbook §3). Toggle panels on/off and
+   relabel headings to fit the business.
+   ============================================================ */
+const MC_CONFIG = {
+  title: "Mission Control",
+  brand: { accent: "#4a8b96", cta: "#4a8fa0", dark: "#2c4a54", good: "#5BD6AA" },
+  refreshSeconds: 60,
+  paths: {
+    calendar:    "personal-ops/data/calendar.json",
+    inbox:       "personal-ops/data/inbox-triage.json",
+    hoursSummary:"client-delivery/data/hours-summary.json",
+    clients:     "client-delivery/inputs/clients.json",
+    clientInbox: "client-delivery/data/client-inbox.json",
+    briefsDir:   "briefs",
+    outputDirs:  ["client-delivery/outputs", "personal-ops/outputs"]
+  },
+  labels: { gauges: "Client hours", pipeline: "Deliverable pipeline",
+            inbox: "Inbox — needs reply", outputs: "Latest outputs", unit: "hrs" },
+  panels: { brief: true, gauges: true, pipeline: true, inbox: true, outputs: true }
+};
+</script>
+<style>
+  :root{
+    --accent:#4a8b96; --cta:#4a8fa0; --dark:#2c4a54; --good:#5BD6AA;
+    --bg:#ffffff; --bg2:#eef4f3; --card:#ffffff;
+    --text:#1a1a1a; --muted:#6f8589; --border:#d4e2e2; --border2:#e9f1f1;
+    --shadow:rgba(44,74,84,.06);
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);
+    color:var(--text);line-height:1.5;padding:22px 26px;}
+  header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);
+    padding-bottom:14px;margin-bottom:18px;}
+  h1{font-size:1.45rem;font-weight:600;letter-spacing:-.02em;color:var(--dark);}
+  .status{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px;}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;}
+  button{background:var(--card);border:1px solid var(--border);padding:8px 14px;border-radius:8px;
+    cursor:pointer;font:inherit;font-size:13px;font-weight:500;}
+  button:hover{background:var(--bg2);}
+  .wrap{max-width:1040px;margin:0 auto;}
+  .h{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--dark);margin:20px 0 10px;}
+  .card{background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:16px;
+    box-shadow:0 1px 3px var(--shadow);margin-bottom:12px;}
+  .row{display:flex;gap:16px;flex-wrap:wrap;}
+  .row>.card{flex:1;min-width:280px;}
+  .gauge-track{height:14px;background:var(--bg2);border-radius:7px;overflow:hidden;margin:8px 0;}
+  .gauge-fill{height:100%;border-radius:7px;}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--bg2);color:var(--muted);margin-left:6px;}
+  .li{padding:7px 0;border-bottom:1px solid var(--border2);font-size:13px;display:flex;gap:8px;align-items:flex-start;}
+  .li:last-child{border-bottom:none;}
+  .li a{color:var(--cta);text-decoration:none;} .li a:hover{text-decoration:underline;}
+  .muted{color:var(--muted);font-size:13px;}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;}
+  .warn{background:#fff5f4;border:1px solid #f3c9c4;color:#a23b30;border-radius:8px;padding:12px 14px;font-size:13px;line-height:1.6;}
+  .warn code{background:#fde8e5;padding:1px 6px;border-radius:4px;}
+  .prio-high{color:#c0392b;font-weight:600;}.prio-med{color:#b9770e;}.prio-low{color:var(--muted);}
+  h1.brief,h2.brief,h3.brief{margin:8px 0 4px;}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="mc-title">Mission Control</h1>
+  <div class="status"><span class="dot"></span><span id="mc-status">starting…</span></div>
+</header>
+<div class="wrap"><div id="mc-content"><div class="muted">Loading…</div></div></div>
+
+<script>
+(function(){
+  const C = MC_CONFIG, P = C.paths, L = C.labels, PAN = C.panels;
+  const content = document.getElementById('mc-content');
+  document.title = C.title;
+  document.getElementById('mc-title').textContent = C.title;
+  if(C.brand){ const r=document.documentElement.style;
+    if(C.brand.accent)r.setProperty('--accent',C.brand.accent);
+    if(C.brand.cta)r.setProperty('--cta',C.brand.cta);
+    if(C.brand.dark)r.setProperty('--dark',C.brand.dark);
+    if(C.brand.good)r.setProperty('--good',C.brand.good); }
+  const REFRESH = (C.refreshSeconds||60)*1000;
+
+  function url(p){ return p + (p.indexOf('?')<0?'?':'&') + 't=' + Date.now(); }
+  async function getJSON(p){ const r=await fetch(url(p),{cache:'no-store'}); if(!r.ok)throw 0; return r.json(); }
+  async function getText(p){ const r=await fetch(url(p),{cache:'no-store'}); if(!r.ok)throw 0; return r.text(); }
+  async function tryGet(fn){ try{ return await fn(); }catch(e){ return null; } }
+  async function listDir(dir){
+    try{
+      const r=await fetch(url(dir.replace(/\/$/,'')+'/'),{cache:'no-store'}); if(!r.ok)return [];
+      const doc=new DOMParser().parseFromString(await r.text(),'text/html'); const out=[];
+      doc.querySelectorAll('a[href]').forEach(a=>{ let n=(a.getAttribute('href')||'').replace(/\/$/,'').split('/').pop();
+        try{n=decodeURIComponent(n);}catch(e){} if(n&&n!=='..'&&!n.startsWith('?'))out.push(n); });
+      return out;
+    }catch(e){ return []; }
+  }
+  async function latestBrief(){
+    const f=(await listDir(P.briefsDir)).filter(n=>/^brief-\d{4}-\d{2}-\d{2}\.md$/.test(n)).sort();
+    if(!f.length)return null; const name=f[f.length-1];
+    return { name, content: await tryGet(()=>getText(P.briefsDir+'/'+name)) };
+  }
+  const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const md=t=>esc(t).replace(/^### (.*)$/gm,'<h3 class="brief">$1</h3>').replace(/^## (.*)$/gm,'<h2 class="brief">$1</h2>')
+    .replace(/^# (.*)$/gm,'<h1 class="brief">$1</h1>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^- (.*)$/gm,'&bull; $1').replace(/\n/g,'<br>');
+
+  async function render(){
+    if(location.protocol==='file:'){
+      content.innerHTML='<div class="warn"><strong>Serve this folder over a local server.</strong><br>'
+        +'This dashboard loads data over HTTP (no folder picker). From the project folder run '
+        +'<code>python -m http.server 8000</code> (or the serve script), then open '
+        +'<code>http://localhost:8000/dashboard.html</code>.</div>';
+      document.getElementById('mc-status').textContent='needs a server';
+      return;
+    }
+    const t0=Date.now();
+    const cal=PAN.brief?(await tryGet(()=>getJSON(P.calendar))||{events:[]}):{events:[]};
+    const inbox=(await tryGet(()=>getJSON(P.inbox))||{needs_reply:[],fyi:[]});
+    const hours=(await tryGet(()=>getJSON(P.hoursSummary))||{by_client:[]});
+    const cinbox=(await tryGet(()=>getJSON(P.clientInbox))||inbox);
+    const clients=(await tryGet(()=>getJSON(P.clients))||{clients:[]});
+    const brief=PAN.brief?await latestBrief():null;
+    const cmap={}; (clients.clients||[]).forEach(c=>cmap[c.id]=c);
+
+    let h='<div class="toolbar"><button id="mc-reload">↻ Reload</button>'
+      +'<span class="muted">live · '+esc(location.host)+' · auto-refresh '+(REFRESH/1000)+'s</span></div>';
+
+    if(PAN.brief){
+      h+='<div class="h">Today’s brief</div><div class="card">';
+      if(brief){ h+='<div class="toolbar"><strong>'+esc(brief.name)+'</strong>'
+        +'<span class="pill">'+((cal.events||[]).length)+' events</span>'
+        +'<span class="pill">'+((inbox.needs_reply||[]).length)+' needs-reply</span></div>'
+        +'<div style="max-height:300px;overflow:auto;">'+md(brief.content||'')+'</div>';
+      } else h+='<div class="muted">No brief yet. Run the Morning Brief or <code>/today refresh</code>.</div>';
+      h+='</div>';
+    }
+
+    if(PAN.gauges){
+      h+='<div class="h">'+esc(L.gauges||'Hours')+'</div><div class="row">';
+      const bc=hours.by_client||[];
+      if(bc.length){ bc.forEach(c=>{ const cl=cmap[c.client_id]||{}; const name=cl.name||c.client_id;
+        const teal=(cl.brand&&cl.brand.primary_teal)||'var(--accent)';
+        const allot=c.allotted||0, used=c.used||0, pct=allot?Math.min(100,Math.round(used/allot*100)):0;
+        const rem=(c.remaining!=null)?c.remaining:(allot-used);
+        h+='<div class="card"><strong>'+esc(name)+'</strong>'
+          +'<div class="gauge-track"><div class="gauge-fill" style="width:'+pct+'%;background:'+teal+';"></div></div>'
+          +'<div class="muted">'+used+' used / '+rem+' remaining of '+allot+' '+esc(L.unit||'hrs')+'</div></div>'; });
+      } else h+='<div class="card muted">No data.</div>';
+      h+='</div>';
+    }
+
+    if(PAN.pipeline){
+      h+='<div class="h">'+esc(L.pipeline||'Pipeline')+'</div><div class="row">';
+      (hours.by_client||[]).forEach(c=>{ const cl=cmap[c.client_id]||{}; const open=c.open_deliverables||[], parked=cl.parked||[];
+        h+='<div class="card"><strong>'+esc(cl.name||c.client_id)+'</strong>';
+        if(open.length){ h+='<div style="margin-top:6px;">'; open.forEach(d=>h+='<div class="li">▸ '+esc(d)+'</div>'); h+='</div>'; }
+        else h+='<div class="muted">No open items.</div>';
+        if(parked.length){ h+='<div class="h" style="margin-top:10px;">Parked</div>'; parked.forEach(d=>h+='<div class="li muted">⏸ '+esc(d)+'</div>'); }
+        h+='</div>'; });
+      h+='</div>';
+    }
+
+    if(PAN.inbox){
+      h+='<div class="h">'+esc(L.inbox||'Inbox — needs reply')+'</div><div class="card">';
+      const cn=cinbox.needs_reply||[];
+      if(cn.length){ cn.forEach(m=>{ const p=m.priority||'low';
+        h+='<div class="li"><span class="prio-'+p+'">['+p.toUpperCase()+']</span> <span><strong>'+esc(m.subject||'')+'</strong> — '+esc(m.from||'')
+          +(m.why?('<br><span class="muted">'+esc(m.why)+'</span>'):'')+'</span></div>'; });
+      } else h+='<div class="muted">Nothing needs a reply.</div>';
+      h+='</div>';
+    }
+
+    if(PAN.outputs){
+      h+='<div class="h">'+esc(L.outputs||'Latest outputs')+'</div><div class="card">';
+      let outs=[]; for(const d of (P.outputDirs||[])){ const fs=await listDir(d); outs=outs.concat(fs.map(n=>d+'/'+n)); }
+      if(outs.length){ outs.forEach(o=>h+='<div class="li">📄 <a href="'+esc(o)+'" target="_blank">'+esc(o)+'</a></div>'); }
+      else h+='<div class="muted">No generated outputs yet.</div>';
+      h+='</div>';
+    }
+
+    h+='<div class="muted" style="margin-top:14px;">Read-only view of the local data layer · loaded in '+(Date.now()-t0)+'ms.</div>';
+    content.innerHTML=h;
+    document.getElementById('mc-status').textContent='updated '+new Date().toLocaleTimeString();
+    const rb=document.getElementById('mc-reload'); if(rb) rb.addEventListener('click',render);
+  }
+
+  render();
+  setInterval(render, REFRESH);
+})();
+</script>
+</body>
+</html>

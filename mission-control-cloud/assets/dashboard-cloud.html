@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mission Control</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* ============================================================
+   MC_CONFIG — customize per business.
+   SUPABASE_URL and SUPABASE_ANON_KEY are safe to ship publicly:
+   the anon key can only READ, and only after a user signs in
+   (Row Level Security enforces this). Real secrets never go here.
+   ============================================================ */
+const MC_CONFIG = {
+  title: "Mission Control",
+  SUPABASE_URL: "https://YOUR-PROJECT.supabase.co",
+  SUPABASE_ANON_KEY: "YOUR-PUBLIC-ANON-KEY",
+  brand: { accent:"#4a8b96", cta:"#4a8fa0", dark:"#2c4a54", good:"#5BD6AA" },
+  refreshSeconds: 300,                       // 5 min; only polls while the tab is visible
+  labels: { gauges:"Client hours", pipeline:"Deliverable pipeline",
+            inbox:"Inbox — needs reply", outputs:"Latest outputs", unit:"hrs" },
+  panels: { brief:true, gauges:true, pipeline:true, inbox:true, outputs:true }
+};
+const MC_KEYS = ["calendar","inbox-triage","hours-summary","client-inbox","clients","brief-latest","outputs"];
+</script>
+<style>
+  :root{--accent:#4a8b96;--cta:#4a8fa0;--dark:#2c4a54;--good:#5BD6AA;
+    --bg:#fff;--bg2:#eef4f3;--card:#fff;--text:#1a1a1a;--muted:#6f8589;--border:#d4e2e2;--border2:#e9f1f1;--shadow:rgba(44,74,84,.06);}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;padding:22px 26px;}
+  header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:14px;margin-bottom:18px;}
+  h1{font-size:1.4rem;font-weight:600;letter-spacing:-.02em;color:var(--dark);}
+  .status{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px;}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;}
+  button{background:var(--card);border:1px solid var(--border);padding:8px 14px;border-radius:8px;cursor:pointer;font:inherit;font-size:13px;font-weight:500;}
+  button:hover{background:var(--bg2);}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .wrap{max-width:1040px;margin:0 auto;}
+  .h{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--dark);margin:20px 0 10px;}
+  .card{background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:16px;box-shadow:0 1px 3px var(--shadow);margin-bottom:12px;}
+  .row{display:flex;gap:16px;flex-wrap:wrap;}.row>.card{flex:1;min-width:280px;}
+  .gauge-track{height:14px;background:var(--bg2);border-radius:7px;overflow:hidden;margin:8px 0;}
+  .gauge-fill{height:100%;border-radius:7px;}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--bg2);color:var(--muted);margin-left:6px;}
+  .li{padding:7px 0;border-bottom:1px solid var(--border2);font-size:13px;display:flex;gap:8px;align-items:flex-start;}.li:last-child{border-bottom:none;}
+  .muted{color:var(--muted);font-size:13px;}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap;}
+  .prio-high{color:#c0392b;font-weight:600;}.prio-med{color:#b9770e;}.prio-low{color:var(--muted);}
+  h1.b,h2.b,h3.b{margin:8px 0 4px;}
+  .login{max-width:360px;margin:8vh auto;padding:28px;border:1px solid var(--border2);border-radius:12px;box-shadow:0 2px 10px var(--shadow);}
+  .login h2{color:var(--dark);font-size:1.2rem;margin-bottom:16px;}
+  .login input{width:100%;padding:10px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;font:inherit;}
+  .login button{width:100%;}.err{color:#c0392b;font-size:13px;margin-top:8px;min-height:18px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function(){
+  const C=MC_CONFIG, L=C.labels, PAN=C.panels;
+  const app=document.getElementById('app');
+  const REFRESH=(C.refreshSeconds||300)*1000;
+  let client=null, timer=null;
+
+  if(C.brand){const r=document.documentElement.style;
+    for(const k of ['accent','cta','dark','good']) if(C.brand[k]) r.setProperty('--'+k,C.brand[k]);}
+
+  function makeClient(){
+    if(!window.supabase){ app.innerHTML='<div class="login"><h2>Couldn’t load Supabase</h2><div class="muted">The Supabase library didn’t load — check your network and that this page is served over https.</div></div>'; return false; }
+    client=window.supabase.createClient(C.SUPABASE_URL,C.SUPABASE_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true}});
+    return true;
+  }
+
+  function loginView(msg){
+    app.innerHTML='<div class="login"><h2>'+esc(C.title)+'</h2>'
+      +'<input id="email" type="email" placeholder="email" autocomplete="username">'
+      +'<input id="pw" type="password" placeholder="password" autocomplete="current-password">'
+      +'<button class="primary" id="go">Sign in</button><div class="err" id="err">'+(msg||'')+'</div></div>';
+    document.getElementById('go').addEventListener('click',signIn);
+    document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')signIn();});
+  }
+  async function signIn(){
+    const email=document.getElementById('email').value.trim(), password=document.getElementById('pw').value;
+    document.getElementById('err').textContent='Signing in…';
+    const {error}=await client.auth.signInWithPassword({email,password});
+    if(error){ document.getElementById('err').textContent=error.message; return; }
+    boot();
+  }
+  async function signOut(){ stopPoll(); await client.auth.signOut(); loginView(''); }
+
+  const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const md=t=>esc(t).replace(/^### (.*)$/gm,'<h3 class="b">$1</h3>').replace(/^## (.*)$/gm,'<h2 class="b">$1</h2>')
+    .replace(/^# (.*)$/gm,'<h1 class="b">$1</h1>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^- (.*)$/gm,'&bull; $1').replace(/\n/g,'<br>');
+
+  function shell(){
+    app.innerHTML='<header><h1>'+esc(C.title)+'</h1>'
+      +'<div class="status"><span class="dot"></span><span id="st">loading…</span>'
+      +'<button id="out" style="margin-left:10px;">Sign out</button></div></header>'
+      +'<div class="wrap"><div id="content"><div class="muted">Loading…</div></div></div>';
+    document.getElementById('out').addEventListener('click',signOut);
+  }
+
+  async function fetchDocs(){
+    const {data,error}=await client.from('mc_documents').select('key,payload').in('key',MC_KEYS);
+    if(error) throw error;
+    const m={}; (data||[]).forEach(r=>m[r.key]=r.payload); return m;
+  }
+
+  async function render(){
+    let docs; try{ docs=await fetchDocs(); }
+    catch(e){ const st=document.getElementById('st'); if(st) st.textContent='read error'; return; }
+    const cal=docs['calendar']||{events:[]}, inbox=docs['inbox-triage']||{needs_reply:[]},
+      hours=docs['hours-summary']||{by_client:[]}, cinbox=docs['client-inbox']||inbox,
+      clients=docs['clients']||{clients:[]}, brief=docs['brief-latest']||null,
+      outputs=docs['outputs']||{files:[]};
+    const cmap={}; (clients.clients||[]).forEach(c=>cmap[c.id]=c);
+
+    let h='<div class="toolbar"><button id="reload">↻ Reload</button>'
+      +'<span class="muted">cloud · auto-refresh '+(REFRESH/1000)+'s while open</span></div>';
+
+    if(PAN.brief){ h+='<div class="h">Today’s brief</div><div class="card">';
+      if(brief&&brief.content){ h+='<div class="toolbar"><strong>'+esc(brief.name||'brief')+'</strong>'
+        +'<span class="pill">'+((cal.events||[]).length)+' events</span>'
+        +'<span class="pill">'+((inbox.needs_reply||[]).length)+' needs-reply</span></div>'
+        +'<div style="max-height:300px;overflow:auto;">'+md(brief.content)+'</div>';
+      } else h+='<div class="muted">No brief yet.</div>'; h+='</div>'; }
+
+    if(PAN.gauges){ h+='<div class="h">'+esc(L.gauges)+'</div><div class="row">';
+      const bc=hours.by_client||[];
+      if(bc.length){ bc.forEach(c=>{ const cl=cmap[c.client_id]||{}, name=cl.name||c.client_id,
+        teal=(cl.brand&&cl.brand.primary_teal)||'var(--accent)', allot=c.allotted||0, used=c.used||0,
+        pct=allot?Math.min(100,Math.round(used/allot*100)):0, rem=(c.remaining!=null)?c.remaining:(allot-used);
+        h+='<div class="card"><strong>'+esc(name)+'</strong><div class="gauge-track"><div class="gauge-fill" style="width:'+pct+'%;background:'+teal+';"></div></div>'
+          +'<div class="muted">'+used+' used / '+rem+' remaining of '+allot+' '+esc(L.unit)+'</div></div>'; });
+      } else h+='<div class="card muted">No data.</div>'; h+='</div>'; }
+
+    if(PAN.pipeline){ h+='<div class="h">'+esc(L.pipeline)+'</div><div class="row">';
+      (hours.by_client||[]).forEach(c=>{ const cl=cmap[c.client_id]||{}, open=c.open_deliverables||[], parked=cl.parked||[];
+        h+='<div class="card"><strong>'+esc(cl.name||c.client_id)+'</strong>';
+        if(open.length){ h+='<div style="margin-top:6px;">'; open.forEach(d=>h+='<div class="li">▸ '+esc(d)+'</div>'); h+='</div>'; }
+        else h+='<div class="muted">No open items.</div>';
+        if(parked.length){ h+='<div class="h" style="margin-top:10px;">Parked</div>'; parked.forEach(d=>h+='<div class="li muted">⏸ '+esc(d)+'</div>'); }
+        h+='</div>'; }); h+='</div>'; }
+
+    if(PAN.inbox){ h+='<div class="h">'+esc(L.inbox)+'</div><div class="card">';
+      const cn=cinbox.needs_reply||[];
+      if(cn.length){ cn.forEach(m=>{ const p=m.priority||'low';
+        h+='<div class="li"><span class="prio-'+p+'">['+p.toUpperCase()+']</span> <span><strong>'+esc(m.subject||'')+'</strong> — '+esc(m.from||'')
+          +(m.why?('<br><span class="muted">'+esc(m.why)+'</span>'):'')+'</span></div>'; });
+      } else h+='<div class="muted">Nothing needs a reply.</div>'; h+='</div>'; }
+
+    if(PAN.outputs){ h+='<div class="h">'+esc(L.outputs)+'</div><div class="card">';
+      const f=outputs.files||[];
+      if(f.length){ f.forEach(o=>h+='<div class="li">📄 '+esc(typeof o==='string'?o:(o.name||''))+'</div>'); }
+      else h+='<div class="muted">No generated outputs listed.</div>'; h+='</div>'; }
+
+    document.getElementById('content').innerHTML=h;
+    const st=document.getElementById('st'); if(st) st.textContent='updated '+new Date().toLocaleTimeString();
+    const rb=document.getElementById('reload'); if(rb) rb.addEventListener('click',render);
+  }
+
+  function startPoll(){ stopPoll(); timer=setInterval(()=>{ if(document.visibilityState==='visible') render(); }, REFRESH); }
+  function stopPoll(){ if(timer){ clearInterval(timer); timer=null; } }
+  document.addEventListener('visibilitychange',()=>{ if(client && document.visibilityState==='visible') render(); });
+
+  async function boot(){ shell(); await render(); startPoll(); }
+
+  (async function init(){
+    if(!makeClient()) return;
+    const {data}=await client.auth.getSession();
+    if(data && data.session) boot(); else loginView('');
+  })();
+})();
+</script>
+</body>
+</html>
